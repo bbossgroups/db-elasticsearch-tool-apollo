@@ -15,51 +15,58 @@ package org.frameworkset.elasticsearch.imp;
  * limitations under the License.
  */
 
-import com.frameworkset.util.SimpleStringUtil;
-import org.frameworkset.elasticsearch.serial.SerialUtil;
-import org.frameworkset.spi.geoip.IpInfo;
+import org.frameworkset.elasticsearch.ElasticSearchHelper;
+import org.frameworkset.elasticsearch.entity.KeyMap;
 import org.frameworkset.tran.DataRefactor;
 import org.frameworkset.tran.DataStream;
 import org.frameworkset.tran.ExportResultHandler;
+import org.frameworkset.tran.Record;
 import org.frameworkset.tran.config.ImportBuilder;
 import org.frameworkset.tran.context.Context;
 import org.frameworkset.tran.metrics.TaskMetrics;
 import org.frameworkset.tran.plugin.db.input.DBInputConfig;
-import org.frameworkset.tran.plugin.db.output.DBOutputConfig;
+import org.frameworkset.tran.plugin.es.output.ElasticsearchOutputConfig;
+import org.frameworkset.tran.record.SplitHandler;
 import org.frameworkset.tran.schedule.ImportIncreamentConfig;
+import org.frameworkset.tran.schedule.TaskContext;
 import org.frameworkset.tran.task.TaskCommand;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.text.DateFormat;
+import java.util.ArrayList;
 import java.util.Date;
-import java.util.concurrent.atomic.AtomicInteger;
+import java.util.List;
 
 /**
- * <p>Description: 同步处理程序，如需调试同步功能，
- * 请运行测试用例DbdemoTest中调试</p>
+ * <p>Description: 同步处理程序，如需调试同步功能，直接运行main方法即可
  * <p></p>
  * <p>Copyright (c) 2018</p>
  * @Date 2018/9/27 20:38
  * @author biaoping.yin
  * @version 1.0
  */
-public class Db2DBdemo {
-	private static final Logger logger = LoggerFactory.getLogger(Db2DBdemo.class);
-	public static void main(String[] args){
-		Db2DBdemo dbdemo = new Db2DBdemo();
-//		dbdemo.fullImportData(  dropIndice);
-//		dbdemo.scheduleImportData(dropIndice);
-		dbdemo.scheduleImportData();
-//		dbdemo.scheduleImportData(dropIndice);
+public class DbdemoWithSplitRecord {
+	private static Logger logger = LoggerFactory.getLogger(DbdemoWithSplitRecord.class);
+	public static void main(String args[]){
+		DbdemoWithSplitRecord dbdemo = new DbdemoWithSplitRecord();
+		boolean dropIndice = true;//CommonLauncher.getBooleanAttribute("dropIndice",false);//同时指定了默认值
+		dbdemo.scheduleTimestampImportData(dropIndice);
 	}
 
 	/**
 	 * elasticsearch地址和数据库地址都从外部配置文件application.properties中获取，加载数据源配置和es配置
 	 */
-	public void scheduleImportData(){
+	public void scheduleTimestampImportData(boolean dropIndice){
 		ImportBuilder importBuilder = ImportBuilder.newInstance();
-
+		//增量定时任务不要删表，但是可以通过删表来做初始化操作
+		if(dropIndice) {
+			try {
+				//清除测试表,导入的时候回重建表，测试的时候加上为了看测试效果，实际线上环境不要删表
+				String repsonse = ElasticSearchHelper.getRestClientUtil().dropIndice("dbdemosplit");
+				System.out.println(repsonse);
+			} catch (Exception e) {
+			}
+		}
 
 
 		//指定导入数据的sql语句，必填项，可以设置自己的提取逻辑，
@@ -68,30 +75,64 @@ public class Db2DBdemo {
 		// 需要设置setLastValueColumn信息log_id，
 		// 通过setLastValueType方法告诉工具增量字段的类型，默认是数字类型
 
-//		importBuilder.setSql("select * from td_sm_log where log_id > #[log_id]");
-//		importBuilder.addIgnoreFieldMapping("remark1");
-//		importBuilder.setSql("select * from td_sm_log ");
-		/**
-		 * 源db相关配置
-		 */
+//		importBuilder.setSql("select * from td_sm_log where LOG_OPERTIME > #[LOG_OPERTIME]");
 		DBInputConfig dbInputConfig = new DBInputConfig();
-		dbInputConfig
-				.setSqlFilepath("sql.xml")
-				.setSqlName("demoexport");
+		dbInputConfig.setDbName("test")
+				     .setSql("select * from td_sm_log where log_id > #[log_id]");
 		importBuilder.setInputConfig(dbInputConfig);
 
-		DBOutputConfig dbOutputConfig = new DBOutputConfig();
-		dbOutputConfig.setDbName("target")
-				.setDbDriver("com.mysql.cj.jdbc.Driver") //数据库驱动程序，必须导入相关数据库的驱动jar包
-				.setDbUrl("jdbc:mysql://localhost:3306/bboss?useUnicode=true&characterEncoding=utf-8&useSSL=false") //通过useCursorFetch=true启用mysql的游标fetch机制，否则会有严重的性能隐患，useCursorFetch必须和jdbcFetchSize参数配合使用，否则不会生效
-				.setDbUser("root")
-				.setDbPassword("123456")
-				.setValidateSQL("select 1")
-				.setUsePool(true)//是否使用连接池
-				.setInsertSqlName("insertSql");
-		importBuilder.setOutputConfig(dbOutputConfig);
+//		importBuilder.addIgnoreFieldMapping("remark1");
+//		importBuilder.setSql("select * from td_sm_log ");
+		importBuilder.setSplitFieldName("LOG_CONTENT");
+		importBuilder.addFieldMapping("LOG_CONTENT","message");
+		importBuilder.setSplitHandler(new SplitHandler() {
+			@Override
+			public List<KeyMap> splitField(TaskContext taskContext,
+														   Record record, Object o) {
+				List<KeyMap> splitDatas = new ArrayList<>();
+				//模拟将数据切割为10条记录
+				for(int i = 0 ; i < 10; i ++){
+					KeyMap d = new KeyMap();
+					d.put("message",i+"-"+o);
+//					d.setKey(SimpleStringUtil.getUUID());//如果是往kafka推送数据，可以设置推送的key
+					splitDatas.add(d);
+				}
+				return splitDatas;
+			}
+		});
+		/**
+		 * es相关配置
+		 */
+//		importBuilder.setTargetElasticsearch("default,test");//同步数据到两个es集群
+		ElasticsearchOutputConfig elasticsearchOutputConfig = new ElasticsearchOutputConfig();
+		elasticsearchOutputConfig.setTargetElasticsearch("test");
+		elasticsearchOutputConfig
+				.setIndex("dbdemosplit"); //必填项
+//				.setIndexType("dbdemosplit") //es 7以后的版本不需要设置indexType，es7以前的版本必需设置indexType
+//				.setRefreshOption("refresh")//可选项，null表示不实时刷新，importBuilder.setRefreshOption("refresh");表示实时刷新
+		//elasticsearchOutputConfig.setEsIdField("log_id");//设置文档主键，不设置，则自动产生文档id
 
-		importBuilder.setBatchSize(10); //可选项,批量导入db的记录数，默认为-1，逐条处理，> 0时批量处理
+		elasticsearchOutputConfig.setDebugResponse(false);//设置是否将每次处理的reponse打印到日志文件中，默认false
+		elasticsearchOutputConfig.setDiscardBulkResponse(false);//设置是否需要批量处理的响应报文，不需要设置为false，true为需要，默认false
+		/**
+		 elasticsearchOutputConfig.setEsIdGenerator(new EsIdGenerator() {
+		 //如果指定EsIdGenerator，则根据下面的方法生成文档id，
+		 // 否则根据setEsIdField方法设置的字段值作为文档id，
+		 // 如果默认没有配置EsIdField和如果指定EsIdGenerator，则由es自动生成文档id
+
+		 @Override
+		 public Object genId(Context context) throws Exception {
+		 return SimpleStringUtil.getUUID();//返回null，则由es自动生成文档id
+		 }
+		 });
+		 */
+		importBuilder.setOutputConfig(elasticsearchOutputConfig);
+
+		importBuilder.setUseJavaName(true) //可选项,将数据库字段名称转换为java驼峰规范的名称，true转换，false不转换，默认false，例如:doc_id -> docId
+				.setUseLowcase(false)  //可选项，true 列名称转小写，false列名称不转换小写，默认false，只要在UseJavaName为false的情况下，配置才起作用
+				.setPrintTaskLog(true) //可选项，true 打印任务执行日志（耗时，处理记录数） false 不打印，默认值false
+				.setBatchSize(10);  //可选项,批量导入es的记录数，默认为-1，逐条处理，> 0时批量处理
+
 		//定时任务配置，
 		importBuilder.setFixedRate(false)//参考jdk timer task文档对fixedRate的说明
 //					 .setScheduleDate(date) //指定任务开始执行时间：日期
@@ -133,13 +174,20 @@ public class Db2DBdemo {
 //		});
 //		//设置任务执行拦截器结束，可以添加多个
 		//增量配置开始
-//		importBuilder.setLastValueColumn("log_id");//手动指定数字增量查询字段，默认采用上面设置的sql语句中的增量变量名称作为增量查询字段的名称，指定以后就用指定的字段
-//		importBuilder.setDateLastValueColumn("log_id");//手动指定日期增量查询字段，默认采用上面设置的sql语句中的增量变量名称作为增量查询字段的名称，指定以后就用指定的字段
+		importBuilder.setLastValueColumn("log_id");//手动指定数字增量查询字段，默认采用上面设置的sql语句中的增量变量名称作为增量查询字段的名称，指定以后就用指定的字段
 		importBuilder.setFromFirst(true);//setFromfirst(false)，如果作业停了，作业重启后从上次截止位置开始采集数据，
-		//setFromfirst(true) 如果作业停了，作业重启后，重新开始采集数据
-		importBuilder.setLastValueStorePath("logdb2db_import");//记录上次采集的增量字段值的文件路径，作为下次增量（或者重启后）采集数据的起点，不同的任务这个路径要不一样
-//		importBuilder.setLastValueStoreTableName("logs");//记录上次采集的增量字段值的表，可以不指定，采用默认表名increament_tab
+//		setFromfirst(true) 如果作业停了，作业重启后，重新开始采集数据
+		importBuilder.setLastValueStorePath("logtablees_import");//记录上次采集的增量字段值的文件路径，作为下次增量（或者重启后）采集数据的起点，不同的任务这个路径要不一样
+		importBuilder.setLastValueStoreTableName("logs");//记录上次采集的增量字段值的表，可以不指定，采用默认表名increament_tab
 		importBuilder.setLastValueType(ImportIncreamentConfig.NUMBER_TYPE);//如果没有指定增量查询字段名称，则需要指定字段类型：ImportIncreamentConfig.NUMBER_TYPE 数字类型
+//		SimpleDateFormat format = new SimpleDateFormat("yyyy-MM-dd");
+//		try {
+//			Date date = format.parse("2000-01-01");
+//			importBuilder.setLastValue(date);//增量起始值配置
+//		}
+//		catch (Exception e){
+//			e.printStackTrace();
+//		}
 		// 或者ImportIncreamentConfig.TIMESTAMP_TYPE 日期类型
 		//增量配置结束
 
@@ -166,71 +214,16 @@ public class Db2DBdemo {
 //		testObject.setName("jackson");
 //		importBuilder.addFieldValue("testObject",testObject);
 //
-		final AtomicInteger s = new AtomicInteger(0);
-		importBuilder.setGeoipDatabase("E:/workspace/hnai/terminal/geolite2/GeoLite2-City.mmdb");
-		importBuilder.setGeoipAsnDatabase("E:/workspace/hnai/terminal/geolite2/GeoLite2-ASN.mmdb");
-		importBuilder.setGeoip2regionDatabase("E:/workspace/hnai/terminal/geolite2/ip2region.db");
 		/**
-		 * 重新设置数据结构
+		 * 重新设置es数据结构
 		 */
 		importBuilder.setDataRefactor(new DataRefactor() {
 			public void refactor(Context context) throws Exception  {
-				//可以根据条件定义是否丢弃当前记录
-				//context.setDrop(true);return;
-//				if(s.incrementAndGet() % 2 == 0) {
-//					context.setDrop(true);
-//					return;
-//				}
-
-
-				context.addFieldValue("author","duoduo");
-				context.addFieldValue("title","解放");
-				context.addFieldValue("subtitle","小康");
-				context.addFieldValue("collecttime",new Date());//
-
-//				context.addIgnoreFieldMapping("title");
-				//上述三个属性已经放置到docInfo中，如果无需再放置到索引文档中，可以忽略掉这些属性
-//				context.addIgnoreFieldMapping("author");
-
-//				//修改字段名称title为新名称newTitle，并且修改字段的值
-//				context.newName2ndData("title","newTitle",(String)context.getValue("title")+" append new Value");
-				context.addIgnoreFieldMapping("subtitle");
-				/**
-				 * 获取ip对应的运营商和区域信息
-				 */
-				IpInfo ipInfo = context.getIpInfo("LOG_VISITORIAL");
-				if(ipInfo != null)
-					context.addFieldValue("ipinfo", SimpleStringUtil.object2json(ipInfo));
-				else{
-					context.addFieldValue("ipinfo", "");
-				}
-				DateFormat dateFormat = SerialUtil.getDateFormateMeta().toDateFormat();
-				Date optime = context.getDateValue("LOG_OPERTIME",dateFormat);
-				context.addFieldValue("logOpertime",optime);
 				context.addFieldValue("collecttime",new Date());
-//				对数据进行格式化
-//				DateFormat dateFormat = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS");
-//				Date optime = context.getDateValue("LOG_OPERTIME");
-//
-//				context.addFieldValue("logOpertime",dateFormat.format(optime));
-
-				/**
-				 //关联查询数据,单值查询
-				 Map headdata = SQLExecutor.queryObjectWithDBName(Map.class,context.getEsjdbc().getDbConfig().getDbName(),
-				 "select * from head where billid = ? and othercondition= ?",
-				 context.getIntegerValue("billid"),"otherconditionvalue");//多个条件用逗号分隔追加
-				 //将headdata中的数据,调用addFieldValue方法将数据加入当前es文档，具体如何构建文档数据结构根据需求定
-				 context.addFieldValue("headdata",headdata);
-				 //关联查询数据,多值查询
-				 List<Map> facedatas = SQLExecutor.queryListWithDBName(Map.class,context.getEsjdbc().getDbConfig().getDbName(),
-				 "select * from facedata where billid = ?",
-				 context.getIntegerValue("billid"));
-				 //将facedatas中的数据,调用addFieldValue方法将数据加入当前es文档，具体如何构建文档数据结构根据需求定
-				 context.addFieldValue("facedatas",facedatas);
-				 */
 			}
 		});
 		//映射和转换配置结束
+
 		/**
 		 * 内置线程池配置，实现多线程并行数据导入功能，作业完成退出时自动关闭该线程池
 		 */
@@ -240,25 +233,25 @@ public class Db2DBdemo {
 		importBuilder.setContinueOnError(true);//任务出现异常，是否继续执行作业：true（默认值）继续执行 false 中断作业执行
 		importBuilder.setAsyn(false);//true 异步方式执行，不等待所有导入作业任务结束，方法快速返回；false（默认值） 同步方式执行，等待所有导入作业任务结束，所有作业结束后方法才返回
 
-		importBuilder.setUseLowcase(false)  //可选项，true 列名称转小写，false列名称不转换小写，默认false，只要在UseJavaName为false的情况下，配置才起作用
-				.setPrintTaskLog(true); //可选项，true 打印任务执行日志（耗时，处理记录数） false 不打印，默认值false
 		importBuilder.setExportResultHandler(new ExportResultHandler<String,String>() {
 			@Override
 			public void success(TaskCommand<String,String> taskCommand, String result) {
 				TaskMetrics taskMetrics = taskCommand.getTaskMetrics();
 				logger.info(taskMetrics.toString());
+				logger.debug(result);
 			}
 
 			@Override
 			public void error(TaskCommand<String,String> taskCommand, String result) {
 				TaskMetrics taskMetrics = taskCommand.getTaskMetrics();
 				logger.info(taskMetrics.toString());
+				logger.debug(result);
 			}
 
 			@Override
 			public void exception(TaskCommand<String,String> taskCommand, Exception exception) {
 				TaskMetrics taskMetrics = taskCommand.getTaskMetrics();
-				logger.info(taskMetrics.toString());
+				logger.debug(taskMetrics.toString());
 			}
 
 			@Override
@@ -271,8 +264,7 @@ public class Db2DBdemo {
 		 */
 		DataStream dataStream = importBuilder.builder();
 		dataStream.execute();//执行导入操作
-
-		logger.info("come to end.");
+//		dataStream.destroy();//释放资源
 
 
 	}
