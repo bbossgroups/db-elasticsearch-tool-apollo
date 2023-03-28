@@ -224,15 +224,7 @@ public class BigTableDemo {
 				logger.error("",exception);
 			}
 
-			/**
-			 * 如果对于执行有错误的任务，可以进行修正后重新执行，通过本方法
-			 * 返回允许的最大重试次数
-			 * @return
-			 */
-			@Override
-			public int getMaxRetry() {
-				return -1;
-			}
+
 		});
 		/**
 		 * 执行数据库表数据导入es操作
